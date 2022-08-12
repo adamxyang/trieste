@@ -42,6 +42,8 @@ from ..interface import (
 )
 
 
+
+
 class ExpectedImprovement(SingleModelAcquisitionBuilder[ProbabilisticModel]):
     """
     Builder for the expected improvement function where the "best" value is taken to be the minimum
