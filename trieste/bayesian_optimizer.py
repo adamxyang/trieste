@@ -60,6 +60,8 @@ from .space import SearchSpace
 from .types import State, TensorType
 from .utils import Err, Ok, Result, Timer, map_values
 
+from trieste.objectives import BRANIN_SEARCH_SPACE
+
 StateType = TypeVar("StateType")
 """ Unbound type variable. """
 
@@ -633,6 +635,9 @@ class BayesianOptimizer(Generic[SearchSpaceType]):
                     acquisition_rule, datasets, models, num_steps, observation_plot_dfs
                 )
 
+        xx, yy = np.mgrid[0:1:100j, 0:1:100j]
+        positions = np.vstack([xx.ravel(), yy.ravel()])
+        acquisition_values_list = []
         for step in range(num_steps):
             logging.set_step_number(step)
 
@@ -674,6 +679,7 @@ class BayesianOptimizer(Generic[SearchSpaceType]):
                                 dataset = datasets[tag]
                                 model.update(dataset)
                                 model.optimize(dataset)
+                    
 
                     with Timer() as query_point_generation_timer:
                         points_or_stateful = acquisition_rule.acquire(
@@ -685,6 +691,10 @@ class BayesianOptimizer(Generic[SearchSpaceType]):
                             query_points = points_or_stateful
 
                     observer_output = self._observer(query_points)
+
+                    acquisition_values = copy.deepcopy(acquisition_rule._acquisition_function)(positions.T[:,None,:])
+                    acquisition_values_list.append(acquisition_values)
+                    tf.print(acquisition_values)
 
                     tagged_output = (
                         observer_output
@@ -735,7 +745,7 @@ class BayesianOptimizer(Generic[SearchSpaceType]):
                 result = OptimizationResult(Err(error), history)
                 if track_state and track_path is not None:
                     result.save_result(Path(track_path) / OptimizationResult.RESULTS_FILENAME)
-                return result
+                return result, acquisition_values_list
 
         tf.print("Optimization completed without errors", output_stream=absl.logging.INFO)
 
@@ -743,7 +753,7 @@ class BayesianOptimizer(Generic[SearchSpaceType]):
         result = OptimizationResult(Ok(record), history)
         if track_state and track_path is not None:
             result.save_result(Path(track_path) / OptimizationResult.RESULTS_FILENAME)
-        return result
+        return result, acquisition_values_list
 
     def _write_summary_init(
         self,

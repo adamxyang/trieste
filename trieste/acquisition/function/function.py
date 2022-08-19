@@ -978,7 +978,7 @@ class batch_monte_carlo_expected_improvement(AcquisitionFunctionClass):
         self._sampler.reset_sampler()
 
     @tf.function
-    def __call__(self, x: TensorType) -> TensorType:
+    def __call__(self, x: TensorType) -> TensorType: #[N,B,d] -> [N, 1]
         samples = tf.squeeze(self._sampler.sample(x, jitter=self._jitter), axis=-1)  # [..., S, B]
         min_sample_per_batch = tf.reduce_min(samples, axis=-1)  # [..., S]
         batch_improvement = tf.maximum(self._eta - min_sample_per_batch, 0.0)  # [..., S]

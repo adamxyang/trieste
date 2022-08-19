@@ -108,8 +108,6 @@ class Glasses(SingleModelAcquisitionBuilder[ProbabilisticModel]):
         return function
 
 
-
-
 class glasses(AcquisitionFunctionClass):
     def __init__(
         self, 
@@ -161,7 +159,6 @@ class glasses(AcquisitionFunctionClass):
         eta = tf.reduce_min(mean, axis=0)
         return max_grads_norm, eta
 
-        
 
     #@tf.function
     def __call__(self, x: TensorType) -> TensorType: # [N, 1, d] -> [N, 1]
@@ -542,12 +539,144 @@ class EfficientGlobalOptimization_qEI(
                                 f"EGO.acquisition_function/maximum_found[{i+1}]", values
                             )
 
-        return tf.random.shuffle(points)[0:1,:]
+        return points[0:1,:]
 
 
 
 
+class BatchMonteCarloExpectedImprovement_penalty(SingleModelAcquisitionBuilder[HasReparamSampler]):
+    """
+    Expected improvement for batches of points (or :math:`q`-EI), approximated using Monte Carlo
+    estimation with the reparametrization trick. See :cite:`Ginsbourger2010` for details.
+    Improvement is measured with respect to the minimum predictive mean at observed query points.
+    This is calculated in :class:`BatchMonteCarloExpectedImprovement` by assuming observations
+    at new points are independent from those at known query points. This is faster, but is an
+    approximation for noisy observers.
+    """
 
+    def __init__(self, sample_size: int, *, jitter: float = DEFAULTS.JITTER, cost_per_step: float = 1, cost_L1: float = 10):
+        """
+        :param sample_size: The number of samples for each batch of points.
+        :param jitter: The size of the jitter to use when stabilising the Cholesky decomposition of
+            the covariance matrix.
+        :raise tf.errors.InvalidArgumentError: If ``sample_size`` is not positive, or ``jitter``
+            is negative.
+        """
+        tf.debugging.assert_positive(sample_size)
+        tf.debugging.assert_greater_equal(jitter, 0.0)
+
+        self._sample_size = sample_size
+        self._jitter = jitter
+        self._cost_per_step = cost_per_step
+        self._cost_L1 = cost_L1
+
+    def __repr__(self) -> str:
+        """"""
+        return f"BatchMonteCarloExpectedImprovement_penalty({self._sample_size!r}, jitter={self._jitter!r})"
+
+    def prepare_acquisition_function(
+        self,
+        model: HasReparamSampler,
+        dataset: Optional[Dataset] = None,
+    ) -> AcquisitionFunction:
+        """
+        :param model: The model. Must have event shape [1].
+        :param dataset: The data from the observer. Must be populated.
+        :return: The batch *expected improvement* acquisition function.
+        :raise ValueError (or InvalidArgumentError): If ``dataset`` is not populated, or ``model``
+            does not have an event shape of [1].
+        """
+        tf.debugging.Assert(dataset is not None, [])
+        dataset = cast(Dataset, dataset)
+        tf.debugging.assert_positive(len(dataset), message="Dataset must be populated.")
+
+        mean, _ = model.predict(dataset.query_points)
+
+        tf.debugging.assert_shapes(
+            [(mean, ["_", 1])], message="Expected model with event shape [1]."
+        )
+
+        eta = tf.reduce_min(mean, axis=0)
+        return batch_monte_carlo_expected_improvement_penalty(self._sample_size, model, eta, self._jitter, x0=dataset.query_points[-2:-1,:], cost_per_step=self._cost_per_step, cost_L1=self._cost_L1)
+
+    def update_acquisition_function(
+        self,
+        function: AcquisitionFunction,
+        model: HasReparamSampler,
+        dataset: Optional[Dataset] = None,
+    ) -> AcquisitionFunction:
+        """
+        :param function: The acquisition function to update.
+        :param model: The model. Must have event shape [1].
+        :param dataset: The data from the observer. Must be populated.
+        """
+        tf.debugging.Assert(dataset is not None, [])
+        dataset = cast(Dataset, dataset)
+        tf.debugging.assert_positive(len(dataset), message="Dataset must be populated.")
+        tf.debugging.Assert(isinstance(function, batch_monte_carlo_expected_improvement_penalty), [])
+        mean, _ = model.predict(dataset.query_points)
+        eta = tf.reduce_min(mean, axis=0)
+        function.update(eta,x0=dataset.query_points[-1:,:])  # type: ignore
+        return function
+
+
+class batch_monte_carlo_expected_improvement_penalty(AcquisitionFunctionClass):
+    def __init__(self, sample_size: int, model: HasReparamSampler, eta: TensorType, jitter: float, x0: TensorType, cost_per_step: float = 1, cost_L1: float = 10):
+        """
+        :param sample_size: The number of Monte-Carlo samples.
+        :param model: The model of the objective function.
+        :param sampler:  ReparametrizationSampler.
+        :param eta: The "best" observation.
+        :param jitter: The size of the jitter to use when stabilising the Cholesky decomposition of
+            the covariance matrix.
+        :return: The expected improvement function. This function will raise
+            :exc:`ValueError` or :exc:`~tf.errors.InvalidArgumentError` if used with a batch size
+            greater than one.
+        """
+        self._sample_size = sample_size
+
+        if not isinstance(model, HasReparamSampler):
+            raise ValueError(
+                f"The batch Monte-Carlo expected improvement acquisition function only supports "
+                f"models that implement a reparam_sampler method; received {model.__repr__()}"
+            )
+
+        sampler = model.reparam_sampler(self._sample_size)
+
+        self._sampler = sampler
+        self._eta = tf.Variable(eta)
+        self._jitter = jitter
+        self._x0 = tf.Variable(x0)
+        self._cost_per_step = cost_per_step
+        self._cost_L1 = cost_L1
+
+    def update(self, eta: TensorType, x0: TensorType) -> None:
+        """Update the acquisition function with a new eta value and reset the reparam sampler."""
+        self._eta.assign(eta)
+        self._x0.assign(x0)
+        self._sampler.reset_sampler()
+
+    @tf.function
+    def __call__(self, x: TensorType) -> TensorType: #[N,B,d] -> [N, 1]
+        samples = tf.squeeze(self._sampler.sample(x, jitter=self._jitter), axis=-1)  # [..., S, B]
+        x0 = tf.repeat(self._x0,x.shape[0],axis=0)[:,None,:]   #[N, 1, d]
+        x_old = tf.concat([x0, x], axis=1)  # [N, B+1, d]
+
+        min_sample_per_batch = tf.reduce_min(samples, axis=-1)  # [..., S]
+        batch_improvement = tf.maximum(self._eta - min_sample_per_batch, 0.0)  # [..., S]
+
+        # L1 = tf.reduce_sum((tf.abs(x - x_old[:,:-1,:])), axis=[2,1])
+        L1 = tf.reduce_sum((x - x_old[:,:-1,:])**2, axis=[2,1])
+        penalty = self._cost_L1 * L1 + self._cost_per_step * x.shape[1] # [N]
+
+        acq = tf.reduce_mean(batch_improvement, axis=-1, keepdims=True)
+
+        tf.print('acq',acq)
+        tf.print('penalty',penalty)
+
+        # return tf.math.log(acq) - tf.math.log(penalty)[:,None]  # [..., 1]
+        return acq/penalty[:,None]  # [..., 1]
+        # return acq/tf.exp(penalty[:,None])  # [..., 1]
 
 
 

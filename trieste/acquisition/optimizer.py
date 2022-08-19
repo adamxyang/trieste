@@ -32,7 +32,10 @@ from ..space import Box, DiscreteSearchSpace, SearchSpace, SearchSpaceType, Tagg
 from ..types import TensorType
 from .interface import AcquisitionFunction
 
+
+
 NUM_SAMPLES_MIN: int = 5000
+# NUM_SAMPLES_MIN: int = 100000
 """
 The default minimum number of initial samples for :func:`generate_continuous_optimizer` and
 :func:`generate_random_search_optimizer` function, used for determining the number of initial
@@ -48,6 +51,7 @@ determining the number of initial samples in the multi-start acquisition functio
 """
 
 NUM_RUNS_DIM: int = 10
+# NUM_RUNS_DIM: int = 100
 """
 The default minimum number of optimization runs per dimension of the search space for
 :func:`generate_continuous_optimizer` function in :func:`automatic_optimizer_selector`, used for
