@@ -27,6 +27,8 @@ import scipy.optimize as spo
 import tensorflow as tf
 import tensorflow_probability as tfp
 
+from trieste.trieste.data import Dataset
+
 from .. import logging
 from ..space import Box, DiscreteSearchSpace, SearchSpace, SearchSpaceType, TaggedProductSearchSpace
 from ..types import TensorType
@@ -215,6 +217,8 @@ def generate_continuous_optimizer(
     def optimize_continuous(
         space: Box | TaggedProductSearchSpace,
         target_func: Union[AcquisitionFunction, Tuple[AcquisitionFunction, int]],
+        dataset: Dataset,
+        batchsize: int
     ) -> TensorType:
         """
         A gradient-based :const:`AcquisitionOptimizer` for :class:'Box'
@@ -244,6 +248,10 @@ def generate_continuous_optimizer(
             raise ValueError(f"vectorization must be positive, got {V}")
 
         candidates = space.sample(num_initial_samples)[:, None, :]  # [num_initial_samples, 1, D]
+
+        for _ in range(batchsize):
+            candidates = 
+
         tiled_candidates = tf.tile(candidates, [1, V, 1])  # [num_initial_samples, V, D]
 
         target_func_values = target_func(tiled_candidates)  # [num_samples, V]

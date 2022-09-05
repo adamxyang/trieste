@@ -692,9 +692,9 @@ class BayesianOptimizer(Generic[SearchSpaceType]):
 
                     observer_output = self._observer(query_points)
 
-                    acquisition_values = copy.deepcopy(acquisition_rule._acquisition_function)(positions.T[:,None,:])
-                    acquisition_values_list.append(acquisition_values)
-                    tf.print(acquisition_values)
+                    # acquisition_values = copy.deepcopy(acquisition_rule._acquisition_function)(positions.T[:,None,:])
+                    # acquisition_values_list.append(acquisition_values)
+                    # tf.print(acquisition_values)
 
                     tagged_output = (
                         observer_output
@@ -745,7 +745,7 @@ class BayesianOptimizer(Generic[SearchSpaceType]):
                 result = OptimizationResult(Err(error), history)
                 if track_state and track_path is not None:
                     result.save_result(Path(track_path) / OptimizationResult.RESULTS_FILENAME)
-                return result, acquisition_values_list
+                return result #, acquisition_values_list
 
         tf.print("Optimization completed without errors", output_stream=absl.logging.INFO)
 
@@ -753,7 +753,7 @@ class BayesianOptimizer(Generic[SearchSpaceType]):
         result = OptimizationResult(Ok(record), history)
         if track_state and track_path is not None:
             result.save_result(Path(track_path) / OptimizationResult.RESULTS_FILENAME)
-        return result, acquisition_values_list
+        return result  #, acquisition_values_list
 
     def _write_summary_init(
         self,
