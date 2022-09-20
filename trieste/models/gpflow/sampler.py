@@ -42,6 +42,7 @@ from ..interfaces import (
     TrajectoryFunctionClass,
     TrajectorySampler,
 )
+import math
 
 try:
     # temporary support for gpflux 0.2.3
@@ -187,6 +188,14 @@ class BatchReparametrizationSampler(ReparametrizationSampler[SupportsPredictJoin
                     [tf.shape(mean)[-1], batch_size, self._sample_size], dtype=tf.float64
                 )  # [L, B, S]
             )
+
+            # samples = tf.transpose(tf.math.sobol_sample(dim=batch_size, num_results=self._sample_size, dtype=tf.float64))
+            # samples = samples[None,:,:]
+
+            # # v = 0.5 + (1 - 1e-6) * (samples - 0.5)
+            # v = 0.5 + 1 * (samples - 0.5)
+            # self._eps.assign(tf.math.erfinv(2 * v - 1) * math.sqrt(2))
+            
             self._initialized.assign(True)
 
         identity = tf.eye(batch_size, dtype=cov.dtype)  # [B, B]

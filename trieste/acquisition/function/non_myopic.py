@@ -441,6 +441,10 @@ from trieste.acquisition.optimizer import (
     batchify_joint,
     batchify_vectorize,
 )
+
+from trieste.acquisition.optimizer_smooth import (
+    batchify_joint_traj,
+)
 from trieste.acquisition.sampler import ExactThompsonSampler, ThompsonSampler
 from trieste.acquisition.utils import select_nth_output
 
@@ -603,6 +607,192 @@ class EfficientGlobalOptimization_qEI(
             elif isinstance(builder, AcquisitionFunctionBuilder):
                 # optimize batch elements jointly
                 optimizer = batchify_joint(optimizer, num_query_points)
+            elif isinstance(builder, GreedyAcquisitionFunctionBuilder):
+                # optimize batch elements sequentially using the logic in acquire.
+                pass
+
+        self._builder: Union[
+            AcquisitionFunctionBuilder[ProbabilisticModelType],
+            GreedyAcquisitionFunctionBuilder[ProbabilisticModelType],
+            VectorizedAcquisitionFunctionBuilder[ProbabilisticModelType],
+        ] = builder
+        self._optimizer = optimizer
+        self._num_query_points = num_query_points
+        self._acquisition_function: Optional[AcquisitionFunction] = None
+
+    def __repr__(self) -> str:
+        """"""
+        return f"""EfficientGlobalOptimization(
+        {self._builder!r},
+        {self._optimizer!r},
+        {self._num_query_points!r})"""
+
+    def acquire(
+        self,
+        search_space: SearchSpaceType,
+        models: Mapping[str, ProbabilisticModelType],
+        datasets: Optional[Mapping[str, Dataset]] = None,
+    ) -> TensorType:
+        """
+        Return the query point(s) that optimizes the acquisition function produced by ``builder``
+        (see :meth:`__init__`).
+
+        :param search_space: The local acquisition search space for *this step*.
+        :param models: The model for each tag.
+        :param datasets: The known observer query points and observations. Whether this is required
+            depends on the acquisition function used.
+        :return: The single (or batch of) points to query.
+        """
+        if self._acquisition_function is None:
+            self._acquisition_function = self._builder.prepare_acquisition_function(
+                models,
+                datasets=datasets,
+            )
+        else:
+            self._acquisition_function = self._builder.update_acquisition_function(
+                self._acquisition_function,
+                models,
+                datasets=datasets,
+            )
+
+        summary_writer = logging.get_tensorboard_writer()
+        step_number = logging.get_step_number()
+        greedy = isinstance(self._builder, GreedyAcquisitionFunctionBuilder)
+
+        with tf.name_scope("EGO.optimizer" + "[0]" * greedy):
+            points = self._optimizer(search_space, self._acquisition_function)
+
+        if summary_writer:
+            with summary_writer.as_default(step=step_number):
+                batched_points = tf.expand_dims(points, axis=0)
+                values = self._acquisition_function(batched_points)[0]
+                if len(values) == 1:
+                    logging.scalar(
+                        "EGO.acquisition_function/maximum_found" + "[0]" * greedy, values[0]
+                    )
+                else:  # vectorized acquisition function
+                    logging.histogram(
+                        "EGO.acquisition_function/maximum_found" + "[0]" * greedy, values
+                    )
+
+        if isinstance(self._builder, GreedyAcquisitionFunctionBuilder):
+            for i in range(
+                self._num_query_points - 1
+            ):  # greedily allocate remaining batch elements
+                self._acquisition_function = self._builder.update_acquisition_function(
+                    self._acquisition_function,
+                    models,
+                    datasets=datasets,
+                    pending_points=points,
+                    new_optimization_step=False,
+                )
+                with tf.name_scope(f"EGO.optimizer[{i+1}]"):
+                    chosen_point = self._optimizer(search_space, self._acquisition_function)
+                points = tf.concat([points, chosen_point], axis=0)
+
+                if summary_writer:
+                    with summary_writer.as_default(step=step_number):
+                        batched_points = tf.expand_dims(chosen_point, axis=0)
+                        values = self._acquisition_function(batched_points)[0]
+                        if len(values) == 1:
+                            logging.scalar(
+                                f"EGO.acquisition_function/maximum_found[{i + 1}]", values[0]
+                            )
+                        else:  # vectorized acquisition function
+                            logging.histogram(
+                                f"EGO.acquisition_function/maximum_found[{i+1}]", values
+                            )
+
+        return points[0:1,:]
+
+
+
+
+class EfficientGlobalOptimization_qEI_traj(
+    AcquisitionRule[TensorType, SearchSpaceType, ProbabilisticModelType]
+):
+    """Implements the Efficient Global Optimization, or EGO, algorithm."""
+
+    @overload
+    def __init__(
+        self: "EfficientGlobalOptimization_qEI[SearchSpaceType, ProbabilisticModel]",
+        builder: None = None,
+        optimizer: AcquisitionOptimizer[SearchSpaceType] | None = None,
+        num_query_points: int = 1,
+    ):
+        ...
+
+    @overload
+    def __init__(
+        self: "EfficientGlobalOptimization_qEI[SearchSpaceType, ProbabilisticModelType]",
+        builder: (
+            AcquisitionFunctionBuilder[ProbabilisticModelType]
+            | GreedyAcquisitionFunctionBuilder[ProbabilisticModelType]
+            | SingleModelAcquisitionBuilder[ProbabilisticModelType]
+            | SingleModelGreedyAcquisitionBuilder[ProbabilisticModelType]
+        ),
+        optimizer: AcquisitionOptimizer[SearchSpaceType] | None = None,
+        num_query_points: int = 1,
+    ):
+        ...
+
+    def __init__(
+        self,
+        builder: Optional[
+            AcquisitionFunctionBuilder[ProbabilisticModelType]
+            | GreedyAcquisitionFunctionBuilder[ProbabilisticModelType]
+            | VectorizedAcquisitionFunctionBuilder[ProbabilisticModelType]
+            | SingleModelAcquisitionBuilder[ProbabilisticModelType]
+            | SingleModelGreedyAcquisitionBuilder[ProbabilisticModelType]
+            | SingleModelVectorizedAcquisitionBuilder[ProbabilisticModelType]
+        ] = None,
+        optimizer: AcquisitionOptimizer[SearchSpaceType] | None = None,
+        num_query_points: int = 1,
+    ):
+        """
+        :param builder: The acquisition function builder to use. Defaults to
+            :class:`~trieste.acquisition.ExpectedImprovement`.
+        :param optimizer: The optimizer with which to optimize the acquisition function built by
+            ``builder``. This should *maximize* the acquisition function, and must be compatible
+            with the global search space. Defaults to
+            :func:`~trieste.acquisition.optimizer.automatic_optimizer_selector`.
+        :param num_query_points: The number of points to acquire.
+        """
+
+        if num_query_points <= 0:
+            raise ValueError(
+                f"Number of query points must be greater than 0, got {num_query_points}"
+            )
+
+        if builder is None:
+            if num_query_points == 1:
+                builder = ExpectedImprovement()
+            else:
+                raise ValueError(
+                    """Need to specify a batch acquisition function when number of query points
+                    is greater than 1"""
+                )
+
+        if optimizer is None:
+            optimizer = automatic_optimizer_selector
+
+        if isinstance(
+            builder,
+            (
+                SingleModelAcquisitionBuilder,
+                SingleModelGreedyAcquisitionBuilder,
+                SingleModelVectorizedAcquisitionBuilder,
+            ),
+        ):
+            builder = builder.using(OBJECTIVE)
+
+        if num_query_points > 1:  # need to build batches of points
+            if isinstance(builder, VectorizedAcquisitionFunctionBuilder):
+                # optimize batch elements independently
+                optimizer = batchify_vectorize(optimizer, num_query_points)
+            elif isinstance(builder, AcquisitionFunctionBuilder):
+                # optimize batch elements jointly
+                optimizer = batchify_joint_traj(optimizer, num_query_points)
             elif isinstance(builder, GreedyAcquisitionFunctionBuilder):
                 # optimize batch elements sequentially using the logic in acquire.
                 pass
@@ -843,6 +1033,12 @@ class batch_monte_carlo_expected_improvement_penalty(AcquisitionFunctionClass):
             batch_improvement = tf.nn.leaky_relu(self._eta - min_sample_per_batch, self._activation_scale)
         elif self._activation == 'softplus':
             batch_improvement = 1/self._activation_scale * tf.math.log(1 + tf.exp(self._activation_scale * tf.maximum(self._eta - min_sample_per_batch, 0.0)))
+        elif self._activation == 'EImax':
+            batch_improvement = tf.maximum(self._eta - min_sample_per_batch, 0.0)  # [..., S]
+            improvement_mean = tf.reduce_mean(batch_improvement, axis=-1)   # [...,]
+            # tf.print(improvement_mean)
+            batch_improvement = tf.where(improvement_mean==0, self._eta - tf.reduce_min(min_sample_per_batch, axis=-1), improvement_mean)
+            batch_improvement = batch_improvement[:,None]
 
         if self._cost_type == 'L1':
             L1 = tf.reduce_sum((tf.abs(x - x_old[:,:-1,:])), axis=[2,1])

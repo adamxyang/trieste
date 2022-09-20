@@ -164,7 +164,7 @@ def optimize_discrete(
     return _get_max_discrete_points(points, target_func)
 
 
-def generate_continuous_optimizer(
+def generate_continuous_optimizer_traj(
     num_initial_samples: int = NUM_SAMPLES_MIN,
     num_optimization_runs: int = 10,
     num_recovery_runs: int = 10,
@@ -247,12 +247,28 @@ def generate_continuous_optimizer(
         if V < 0:
             raise ValueError(f"vectorization must be positive, got {V}")
 
-        candidates = space.sample(num_initial_samples)[:, None, :]  # [num_initial_samples, 1, D]
+        # candidates = space.sample(num_initial_samples)[:, None, :]  # [num_initial_samples, 1, D]
 
+        # x_old = dataset['OBJECTIVE'].query_points[-1:,:]
+        # x_old = tf.repeat(x_old, num_initial_samples, axis=0)
+        # candidates_list = []
+        # for _ in range(batchsize):
+        #     candidates = tf.random.normal(x_old.shape, mean=x_old, stddev=.01, dtype=tf.float64)
+        #     candidates_list.append(candidates)
+        #     x_old = candidates
+
+        x_old = dataset['OBJECTIVE'].query_points[-1:,:]
+        x_old = tf.repeat(x_old, num_initial_samples, axis=0)
+        velocity = tf.random.normal(x_old.shape, mean=x_old, stddev=.1, dtype=tf.float64)
+        candidates_list = []
         for _ in range(batchsize):
-            candidates = 
+            candidates = x_old + velocity + tf.random.normal(x_old.shape, mean=0, stddev=.05, dtype=tf.float64)
+            candidates = tf.clip_by_value(candidates, 0, 1)
+            candidates_list.append(candidates)
+            x_old = candidates
 
-        tiled_candidates = tf.tile(candidates, [1, V, 1])  # [num_initial_samples, V, D]
+        candidates_list = tf.concat(candidates_list, axis=1)
+        tiled_candidates = tf.tile(candidates_list[:,None,:], [1, V, 1])  # [num_initial_samples, V, D]
 
         target_func_values = target_func(tiled_candidates)  # [num_samples, V]
         tf.debugging.assert_shapes(
@@ -572,9 +588,9 @@ def get_bounds_of_box_relaxation_around_point(
     return spo.Bounds(space_with_fixed_discrete.lower, space_with_fixed_discrete.upper)
 
 
-def batchify_joint(
+def batchify_joint_traj(
     batch_size_one_optimizer: AcquisitionOptimizer[SearchSpaceType],
-    batch_size: int,
+    batch_size: int
 ) -> AcquisitionOptimizer[SearchSpaceType]:
     """
     A wrapper around our :const:`AcquisitionOptimizer`s. This class wraps a
@@ -592,6 +608,8 @@ def batchify_joint(
     def optimizer(
         search_space: SearchSpaceType,
         f: Union[AcquisitionFunction, Tuple[AcquisitionFunction, int]],
+        dataset: Dataset,
+        batchsize: int
     ) -> TensorType:
         expanded_search_space = search_space ** batch_size  # points have shape [B * D]
 
@@ -607,7 +625,7 @@ def batchify_joint(
             return af(tf.reshape(x, x.shape[:-2].as_list() + [batch_size, -1]))
 
         vectorized_points = batch_size_one_optimizer(  # [1, B * D]
-            expanded_search_space, target_func_with_vectorized_inputs
+            expanded_search_space, target_func_with_vectorized_inputs, dataset, batch_size
         )
         return tf.reshape(vectorized_points, [batch_size, -1])  # [B, D]
 
